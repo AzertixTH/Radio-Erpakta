@@ -9,6 +9,7 @@ function App() {
   const [volume, setVolume] = useState(75);
   const [muted, setMuted] = useState(false);
   const [queue, setQueue] = useState([]);
+  const [needsTap, setNeedsTap] = useState(!localStorage.getItem('erpakta_started'));
 
   const wsRef = useRef(null);
   const audioRef = useRef(new Audio());
@@ -137,6 +138,12 @@ function App() {
     audioRef.current.muted = next;
   }
 
+  function handleTap() {
+    audioRef.current.play().catch(() => {});
+    localStorage.setItem('erpakta_started', '1');
+    setNeedsTap(false);
+  }
+
   return (
     <div className="container">
       <div className="card">
@@ -162,6 +169,13 @@ function App() {
             <p className="no-tracks">Geen nummers beschikbaar</p>
           )}
         </div>
+
+        {needsTap && (
+          <div className="tap-to-listen">
+            <button className="tap-btn" onClick={handleTap}>▶</button>
+            <span className="tap-label">Tik om te luisteren</span>
+          </div>
+        )}
 
         <div className="volume-control">
           <svg onClick={handleMute} className="volume-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={muted ? '#f43f5e' : '#6b7280'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ cursor: 'pointer', flexShrink: 0 }}>
