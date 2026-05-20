@@ -9,7 +9,7 @@ function App() {
   const [volume, setVolume] = useState(75);
   const [muted, setMuted] = useState(false);
   const [queue, setQueue] = useState([]);
-  const [needsTap, setNeedsTap] = useState(true);
+  const [needsTap, setNeedsTap] = useState(!localStorage.getItem('erpakta_started'));
 
   const wsRef = useRef(null);
   const audioRef = useRef(new Audio());
@@ -139,6 +139,7 @@ function App() {
   }
 
   function handleTap() {
+    localStorage.setItem('erpakta_started', '1');
     setNeedsTap(false);
     fetch(`${API_URL}/api/current-track`)
       .then(r => r.json())
