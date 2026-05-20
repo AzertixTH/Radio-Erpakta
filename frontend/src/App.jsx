@@ -139,9 +139,19 @@ function App() {
   }
 
   function handleTap() {
-    audioRef.current.play().catch(() => {});
     localStorage.setItem('erpakta_started', '1');
     setNeedsTap(false);
+    fetch(`${API_URL}/api/current-track`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.id) {
+          const audio = audioRef.current;
+          audio.src = API_URL + data.url;
+          audio.currentTime = data.position;
+          audio.play().catch(() => {});
+        }
+      })
+      .catch(() => {});
   }
 
   return (
