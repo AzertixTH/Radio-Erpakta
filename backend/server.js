@@ -210,19 +210,8 @@ const wss = new WebSocket.Server({ server });
 
 let clients = [];
 
-// Ping alle clients elke 25s om verbinding levend te houden
-setInterval(() => {
-  wss.clients.forEach(ws => {
-    if (ws.isAlive === false) { ws.terminate(); return; }
-    ws.isAlive = false;
-    ws.ping();
-  });
-}, 25000);
-
 wss.on('connection', (ws) => {
   console.log('🔗 Client verbonden');
-  ws.isAlive = true;
-  ws.on('pong', () => { ws.isAlive = true; });
   clients.push(ws);
 
   if (playlist.length > 0) {

@@ -64,7 +64,7 @@ function App() {
       const audio = audioRef.current;
       audio.src = API_URL + t.url;
       audio.currentTime = t.position;
-      if (t.isPlaying) audio.play().catch(() => {});
+      if (t.isPlaying) audio.play().catch(() => setNeedsTap(true));
 
       if ('mediaSession' in navigator) {
         navigator.mediaSession.metadata = new MediaMetadata({
@@ -78,7 +78,7 @@ function App() {
       if (isPlayingRef.current !== t.isPlaying) {
         isPlayingRef.current = t.isPlaying;
         setIsPlaying(t.isPlaying);
-        if (t.isPlaying) audioRef.current.play().catch(() => {});
+        if (t.isPlaying) audioRef.current.play().catch(() => setNeedsTap(true));
         else audioRef.current.pause();
       }
     }
@@ -101,8 +101,16 @@ function App() {
       if (!intentionalClose) setTimeout(() => window.location.reload(), 3000);
     };
 
+    // Heartbeat om verbinding levend te houden op Render
+    const heartbeat = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 20000);
+
     return () => {
       intentionalClose = true;
+      clearInterval(heartbeat);
       ws.close();
     };
   }, []);
