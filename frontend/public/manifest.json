@@ -1,0 +1,22 @@
+{
+  "name": "Radio Erpakta",
+  "short_name": "Radio Erpakta",
+  "description": "Want alles is voorbij",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#f953c6",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/RadioErpakta.jpg",
+      "sizes": "192x192",
+      "type": "image/jpeg"
+    },
+    {
+      "src": "/RadioErpakta.jpg",
+      "sizes": "512x512",
+      "type": "image/jpeg"
+    }
+  ]
+}
