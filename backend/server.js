@@ -117,7 +117,8 @@ function scheduleAutoAdvance() {
     currentTrackIndex = (currentTrackIndex + 1) % playlist.length;
     playbackStartTime = Date.now();
     console.log(`▶  Auto-advancing to: ${playlist[currentTrackIndex].title}`);
-    broadcastCurrentTrack();
+    // Niet broadcasten naar bestaande clients — die gebruiken audio.ended
+    // Alleen server state updaten voor nieuwe verbindingen
     scheduleAutoAdvance();
   }, remaining * 1000);
 }
