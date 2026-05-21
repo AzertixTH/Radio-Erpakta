@@ -7,20 +7,22 @@ const { v4: uuidv4 } = require('uuid');
 const WebSocket = require('ws');
 const http = require('http');
 const mm = require('music-metadata');
+const cron = require('node-cron');
 
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const uploadsDir = path.join(__dirname, 'uploads');
+const scheduledDir = path.join(__dirname, 'scheduled');
 
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+if (!fs.existsSync(scheduledDir)) fs.mkdirSync(scheduledDir, { recursive: true });
 
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(uploadsDir));
+app.use('/scheduled', express.static(scheduledDir));
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadsDir),
@@ -39,11 +41,20 @@ const upload = multer({
   }
 });
 
+// Normale playlist state
 let playlist = [];
 let currentTrackIndex = 0;
 let playbackStartTime = Date.now();
 let isPlaying = true;
 let autoAdvanceTimer = null;
+
+// Misviering state
+let massPlaylist = [];
+let playedMasses = new Set();
+let isMassMode = false;
+let currentMass = null;
+let savedTrackIndex = 0;
+let massTimer = null;
 
 function parseTrackMeta(filename) {
   const base = path.basename(filename, path.extname(filename));
@@ -52,35 +63,27 @@ function parseTrackMeta(filename) {
   return { artist: '', songTitle: base };
 }
 
+async function loadAudioFiles(dir, urlPrefix) {
+  const files = fs.readdirSync(dir).filter(file =>
+    ['.mp3', '.wav', '.ogg', '.webm', '.flac'].includes(path.extname(file).toLowerCase())
+  );
+  return Promise.all(files.map(async file => {
+    const filepath = path.join(dir, file);
+    let duration = 1800;
+    try {
+      const metadata = await mm.parseFile(filepath, { duration: true });
+      if (metadata.format.duration) duration = Math.ceil(metadata.format.duration);
+    } catch {}
+    const { artist, songTitle } = parseTrackMeta(file);
+    return { id: uuidv4(), title: path.basename(file, path.extname(file)), artist, songTitle, filename: file, url: `${urlPrefix}/${file}`, duration };
+  }));
+}
+
 async function loadPlaylistFromDisk() {
   try {
-    const files = fs.readdirSync(uploadsDir).filter(file =>
-      ['.mp3', '.wav', '.ogg', '.webm', '.flac'].includes(path.extname(file).toLowerCase())
-    );
-
-    const tracks = await Promise.all(files.map(async file => {
-      const filepath = path.join(uploadsDir, file);
-      let duration = 180;
-      try {
-        const metadata = await mm.parseFile(filepath, { duration: true });
-        if (metadata.format.duration) duration = Math.ceil(metadata.format.duration);
-      } catch {}
-      const { artist, songTitle } = parseTrackMeta(file);
-      return {
-        id: uuidv4(),
-        title: path.basename(file, path.extname(file)),
-        artist,
-        songTitle,
-        filename: file,
-        url: `/uploads/${file}`,
-        duration,
-        uploadedAt: new Date()
-      };
-    }));
-
+    const tracks = await loadAudioFiles(uploadsDir, '/uploads');
     playlist = tracks;
 
-    // Fisher-Yates shuffle
     for (let i = playlist.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [playlist[i], playlist[j]] = [playlist[j], playlist[i]];
@@ -97,6 +100,20 @@ async function loadPlaylistFromDisk() {
   }
 }
 
+async function loadMassPlaylist() {
+  try {
+    massPlaylist = await loadAudioFiles(scheduledDir, '/scheduled');
+    if (massPlaylist.length === 0) {
+      console.log('⚠️  Geen misviering bestanden gevonden in scheduled/');
+    } else {
+      console.log(`🕊️  ${massPlaylist.length} missen geladen`);
+      massPlaylist.forEach(m => console.log(`   ${m.title} (${formatDuration(m.duration)})`));
+    }
+  } catch (err) {
+    console.error('Fout bij laden missen:', err);
+  }
+}
+
 function formatDuration(seconds) {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
@@ -105,7 +122,7 @@ function formatDuration(seconds) {
 
 function scheduleAutoAdvance() {
   if (autoAdvanceTimer) clearTimeout(autoAdvanceTimer);
-  if (!isPlaying || playlist.length === 0) return;
+  if (!isPlaying || playlist.length === 0 || isMassMode) return;
 
   const track = playlist[currentTrackIndex % playlist.length];
   const elapsed = (Date.now() - playbackStartTime) / 1000;
@@ -114,18 +131,104 @@ function scheduleAutoAdvance() {
   console.log(`⏱  Next track in ${Math.round(remaining)}s`);
 
   autoAdvanceTimer = setTimeout(() => {
+    if (isMassMode) return;
     currentTrackIndex = (currentTrackIndex + 1) % playlist.length;
     playbackStartTime = Date.now();
     console.log(`▶  Auto-advancing to: ${playlist[currentTrackIndex].title}`);
-    // Niet broadcasten naar bestaande clients — die gebruiken audio.ended
-    // Alleen server state updaten voor nieuwe verbindingen
     scheduleAutoAdvance();
   }, remaining * 1000);
 }
 
+// ========================
+// MISVIERING SYSTEEM
+// ========================
+
+function startMass() {
+  if (massPlaylist.length === 0) {
+    console.log('⚠️  Geen missen beschikbaar, misviering overgeslagen');
+    return;
+  }
+  if (isMassMode) {
+    console.log('⚠️  Misviering al bezig, overgeslagen');
+    return;
+  }
+
+  // Reset als alle missen al gespeeld zijn
+  if (playedMasses.size >= massPlaylist.length) playedMasses.clear();
+
+  const available = massPlaylist.filter(m => !playedMasses.has(m.id));
+  const mass = available[Math.floor(Math.random() * available.length)];
+  playedMasses.add(mass.id);
+
+  // Sla huidige staat op
+  savedTrackIndex = currentTrackIndex;
+  if (autoAdvanceTimer) clearTimeout(autoAdvanceTimer);
+
+  isMassMode = true;
+  currentMass = mass;
+  playbackStartTime = Date.now();
+
+  console.log(`🕊️  Misviering gestart: ${mass.title} (${formatDuration(mass.duration)})`);
+
+  // Broadcast misviering naar alle clients
+  const message = JSON.stringify({
+    type: 'current-track',
+    data: {
+      id: mass.id,
+      title: mass.title,
+      artist: mass.artist,
+      songTitle: mass.songTitle,
+      url: mass.url,
+      duration: mass.duration,
+      position: 0,
+      isPlaying: true,
+      trackIndex: 0,
+      totalTracks: 1,
+      isMass: true,
+    }
+  });
+  clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(message); });
+
+  // Terugkeer naar normale playlist na mis
+  massTimer = setTimeout(() => endMass(), mass.duration * 1000);
+}
+
+function endMass() {
+  if (!isMassMode) return;
+  isMassMode = false;
+  currentMass = null;
+  currentTrackIndex = (savedTrackIndex + 1) % playlist.length;
+  playbackStartTime = Date.now();
+
+  console.log('🎵 Misviering voorbij, terug naar normale playlist');
+  broadcastCurrentTrack();
+  scheduleAutoAdvance();
+}
+
+// Dagelijks om 8:00 en 16:00 Belgische tijd
+cron.schedule('0 8 * * *', startMass, { timezone: 'Europe/Brussels' });
+cron.schedule('0 16 * * *', startMass, { timezone: 'Europe/Brussels' });
+
 // API Endpoints
 
 app.get('/api/current-track', (req, res) => {
+  if (isMassMode && currentMass) {
+    const elapsedSeconds = Math.floor((Date.now() - playbackStartTime) / 1000);
+    return res.json({
+      id: currentMass.id,
+      title: currentMass.title,
+      artist: currentMass.artist,
+      songTitle: currentMass.songTitle,
+      url: currentMass.url,
+      duration: currentMass.duration,
+      position: elapsedSeconds,
+      isPlaying: true,
+      trackIndex: 0,
+      totalTracks: 1,
+      isMass: true,
+    });
+  }
+
   if (playlist.length === 0) {
     return res.json({ id: null, title: 'Geen nummers beschikbaar', url: null, position: 0, isPlaying: false });
   }
@@ -136,18 +239,20 @@ app.get('/api/current-track', (req, res) => {
   res.json({
     id: currentTrack.id,
     title: currentTrack.title,
+    artist: currentTrack.artist,
+    songTitle: currentTrack.songTitle,
     url: currentTrack.url,
     duration: currentTrack.duration,
     position: elapsedSeconds,
     isPlaying,
     trackIndex: currentTrackIndex,
-    totalTracks: playlist.length
+    totalTracks: playlist.length,
+    isMass: false,
   });
 });
 
 app.get('/api/queue', (req, res) => {
-  if (playlist.length === 0) return res.json([]);
-
+  if (isMassMode || playlist.length === 0) return res.json([]);
   const queue = [];
   for (let i = 1; i <= Math.min(10, playlist.length); i++) {
     const idx = (currentTrackIndex + i) % playlist.length;
@@ -159,37 +264,26 @@ app.get('/api/queue', (req, res) => {
 app.get('/api/playlist', (req, res) => res.json(playlist));
 
 app.post('/api/next', (req, res) => {
+  if (isMassMode) return res.status(400).json({ error: 'Misviering bezig' });
   if (playlist.length === 0) return res.status(400).json({ error: 'Lege playlist' });
-
   currentTrackIndex = (currentTrackIndex + 1) % playlist.length;
   playbackStartTime = Date.now();
-
   broadcastCurrentTrack();
   scheduleAutoAdvance();
-
   res.json({ success: true, currentTrack: playlist[currentTrackIndex] });
 });
 
 app.post('/api/toggle-play', (req, res) => {
+  if (isMassMode) return res.status(400).json({ error: 'Misviering bezig' });
   isPlaying = !isPlaying;
-
-  if (isPlaying) {
-    playbackStartTime = Date.now();
-    scheduleAutoAdvance();
-  } else {
-    if (autoAdvanceTimer) {
-      clearTimeout(autoAdvanceTimer);
-      autoAdvanceTimer = null;
-    }
-  }
-
+  if (isPlaying) { playbackStartTime = Date.now(); scheduleAutoAdvance(); }
+  else { if (autoAdvanceTimer) { clearTimeout(autoAdvanceTimer); autoAdvanceTimer = null; } }
   broadcastCurrentTrack();
   res.json({ success: true, isPlaying });
 });
 
 app.post('/api/upload', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Geen file geupload' });
-
   const newTrack = {
     id: uuidv4(),
     title: path.basename(req.file.filename, path.extname(req.file.filename)),
@@ -198,10 +292,8 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
     duration: 180,
     uploadedAt: new Date()
   };
-
   playlist.push(newTrack);
   broadcastPlaylistUpdate();
-
   res.json({ success: true, track: newTrack, message: `✅ '${newTrack.title}' toegevoegd!` });
 });
 
@@ -215,23 +307,34 @@ wss.on('connection', (ws) => {
   console.log('🔗 Client verbonden');
   clients.push(ws);
 
-  if (playlist.length > 0) {
-    const currentTrack = playlist[currentTrackIndex];
-    const elapsedSeconds = Math.floor((Date.now() - playbackStartTime) / 1000);
-    ws.send(JSON.stringify({
-      type: 'current-track',
-      data: {
-        id: currentTrack.id,
-        title: currentTrack.title,
-        url: currentTrack.url,
-        duration: currentTrack.duration,
-        position: elapsedSeconds,
-        isPlaying,
-        trackIndex: currentTrackIndex,
-        totalTracks: playlist.length
-      }
-    }));
-  }
+  // Stuur huidige staat naar nieuwe client
+  const trackData = isMassMode && currentMass ? {
+    id: currentMass.id,
+    title: currentMass.title,
+    artist: currentMass.artist,
+    songTitle: currentMass.songTitle,
+    url: currentMass.url,
+    duration: currentMass.duration,
+    position: Math.floor((Date.now() - playbackStartTime) / 1000),
+    isPlaying: true,
+    trackIndex: 0,
+    totalTracks: 1,
+    isMass: true,
+  } : playlist.length > 0 ? {
+    id: playlist[currentTrackIndex].id,
+    title: playlist[currentTrackIndex].title,
+    artist: playlist[currentTrackIndex].artist,
+    songTitle: playlist[currentTrackIndex].songTitle,
+    url: playlist[currentTrackIndex].url,
+    duration: playlist[currentTrackIndex].duration,
+    position: Math.floor((Date.now() - playbackStartTime) / 1000),
+    isPlaying,
+    trackIndex: currentTrackIndex,
+    totalTracks: playlist.length,
+    isMass: false,
+  } : null;
+
+  if (trackData) ws.send(JSON.stringify({ type: 'current-track', data: trackData }));
 
   broadcastListenerCount();
 
@@ -246,10 +349,8 @@ wss.on('connection', (ws) => {
 
 function broadcastCurrentTrack() {
   if (playlist.length === 0) return;
-
   const currentTrack = playlist[currentTrackIndex];
   const elapsedSeconds = Math.floor((Date.now() - playbackStartTime) / 1000);
-
   const message = JSON.stringify({
     type: 'current-track',
     data: {
@@ -262,28 +363,22 @@ function broadcastCurrentTrack() {
       position: elapsedSeconds,
       isPlaying,
       trackIndex: currentTrackIndex,
-      totalTracks: playlist.length
+      totalTracks: playlist.length,
+      isMass: false,
     }
   });
-
-  clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) client.send(message);
-  });
+  clients.forEach(client => { if (client.readyState === WebSocket.OPEN) client.send(message); });
 }
 
 function broadcastPlaylistUpdate() {
   const message = JSON.stringify({ type: 'playlist-update', data: { playlist } });
-  clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) client.send(message);
-  });
+  clients.forEach(client => { if (client.readyState === WebSocket.OPEN) client.send(message); });
 }
 
 function broadcastListenerCount() {
   const count = clients.filter(c => c.readyState === WebSocket.OPEN).length;
   const message = JSON.stringify({ type: 'listener-count', data: { count } });
-  clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) client.send(message);
-  });
+  clients.forEach(client => { if (client.readyState === WebSocket.OPEN) client.send(message); });
 }
 
 app.use((err, req, res, next) => {
@@ -291,15 +386,13 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: err.message });
 });
 
-// Serve frontend in production
 const frontendDist = path.join(__dirname, '../frontend/dist');
 if (fs.existsSync(frontendDist)) {
   app.use(express.static(frontendDist));
   app.get('*', (req, res) => res.sendFile(path.join(frontendDist, 'index.html')));
 }
 
-// Boot: read durations first, then start server
-loadPlaylistFromDisk().then(() => {
+loadPlaylistFromDisk().then(() => loadMassPlaylist()).then(() => {
   scheduleAutoAdvance();
   server.listen(PORT, () => {
     console.log(`
@@ -311,7 +404,9 @@ loadPlaylistFromDisk().then(() => {
 📡 WebSocket: ws://localhost:${PORT}
 🌐 API:       http://localhost:${PORT}/api
 📁 Uploads:   ${uploadsDir}
+🕊️  Scheduled: ${scheduledDir}
 🎶 ${playlist.length} nummers geladen
+⏰ Missen: dagelijks 8:00 en 16:00
 
 Ready to stream! 🚀
     `);
