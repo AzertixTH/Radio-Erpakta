@@ -18,6 +18,7 @@ function App() {
   const positionRef = useRef(0);
   const trackDurationRef = useRef(0);
   const progressElRef = useRef(null);
+  const playlistRef = useRef([]); // volledige playlist voor ended handler
 
   const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:3001' : '');
   const WS_URL = import.meta.env.VITE_WS_URL || (import.meta.env.DEV ? 'ws://localhost:3001' : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`);
@@ -38,6 +39,52 @@ function App() {
       }
     }, 1000);
     return () => clearInterval(timer);
+  }, []);
+
+  // audio.ended handler — werkt op vergrendeld scherm want het is een media event
+  useEffect(() => {
+    const audio = audioRef.current;
+
+    const handleEnded = () => {
+      const pl = playlistRef.current;
+      if (pl.length === 0) return;
+
+      const currentIdx = pl.findIndex(t => t.id === activeTrackIdRef.current);
+      const nextIdx = (currentIdx + 1) % pl.length;
+      const next = pl[nextIdx];
+
+      // Update refs meteen zodat WS broadcast het niet opnieuw triggert
+      activeTrackIdRef.current = next.id;
+      positionRef.current = 0;
+      trackDurationRef.current = next.duration || 0;
+      isPlayingRef.current = true;
+
+      setTrack({
+        id: next.id,
+        songTitle: next.songTitle || next.title,
+        artist: next.artist || '',
+        duration: next.duration || 0,
+        trackIndex: nextIdx,
+        totalTracks: pl.length,
+      });
+      setIsPlaying(true);
+
+      audio.src = API_URL + next.url;
+      audio.currentTime = 0;
+      audio.play().catch(() => setNeedsTap(true));
+
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: next.songTitle || next.title,
+          artist: next.artist || 'Radio Erpakta',
+        });
+      }
+
+      loadQueue();
+    };
+
+    audio.addEventListener('ended', handleEnded);
+    return () => audio.removeEventListener('ended', handleEnded);
   }, []);
 
   function applyTrack(t) {
@@ -101,7 +148,6 @@ function App() {
       if (!intentionalClose) setTimeout(() => window.location.reload(), 3000);
     };
 
-    // Heartbeat om verbinding levend te houden op Render
     const heartbeat = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'ping' }));
@@ -116,10 +162,17 @@ function App() {
   }, []);
 
   useEffect(() => {
+    // Haal volledige playlist op voor de ended handler
+    fetch(`${API_URL}/api/playlist`)
+      .then(r => r.json())
+      .then(data => { playlistRef.current = data; })
+      .catch(() => {});
+
     fetch(`${API_URL}/api/current-track`)
       .then(r => r.json())
       .then(data => { if (activeTrackIdRef.current === null) applyTrack(data); })
       .catch(() => {});
+
     loadQueue();
   }, []);
 
